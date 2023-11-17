@@ -1,10 +1,10 @@
 // e1000 Driver for Intel 82540EP/EM
-use super::e1000_const::*;
 use super::super::Ext;
 use super::super::Volatile;
+use super::e1000_const::*;
+use crate::utils::*;
 use alloc::vec::Vec;
 use core::{cmp::min, mem::size_of, slice::from_raw_parts_mut};
-use crate::utils::*;
 
 const TX_RING_SIZE: usize = 256;
 const RX_RING_SIZE: usize = 256;
@@ -82,9 +82,8 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
 
         // Exercise3 Checkpoint 1
         // 分配tx_ring和rx_ring的内存空间并返回dma虚拟地址和物理地址
-        // let (tx_ring_vaddr, tx_ring_dma) = ?
-        // let (rx_ring_vaddr, rx_ring_dma) = ?
-
+        let (tx_ring_vaddr, tx_ring_dma) = unsafe { kfn.dma_alloc_coherent(alloc_tx_ring_pages) };
+        let (rx_ring_vaddr, rx_ring_dma) = unsafe { kfn.dma_alloc_coherent(alloc_rx_ring_pages) };
 
         let tx_ring = unsafe { from_raw_parts_mut(tx_ring_vaddr as *mut TxDesc, TX_RING_SIZE) };
         let rx_ring = unsafe { from_raw_parts_mut(rx_ring_vaddr as *mut RxDesc, RX_RING_SIZE) };
@@ -110,20 +109,21 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
         let mut tx_mbufs = Vec::with_capacity(tx_ring.len());
         let mut rx_mbufs = Vec::with_capacity(rx_ring.len());
 
-        let alloc_tx_buffer_pages = ((TX_RING_SIZE * MBUF_SIZE) + (K::PAGE_SIZE - 1)) / K::PAGE_SIZE;
-        let alloc_rx_buffer_pages = ((RX_RING_SIZE * MBUF_SIZE) + (K::PAGE_SIZE - 1)) / K::PAGE_SIZE;
+        let alloc_tx_buffer_pages =
+            ((TX_RING_SIZE * MBUF_SIZE) + (K::PAGE_SIZE - 1)) / K::PAGE_SIZE;
+        let alloc_rx_buffer_pages =
+            ((RX_RING_SIZE * MBUF_SIZE) + (K::PAGE_SIZE - 1)) / K::PAGE_SIZE;
 
         // Exercise3 Checkpoint 2
         // 分配tx_buffer和rx_buffer的内存空间 并返回dma虚拟地址和物理地址
-        // let (mut tx_mbufs_vaddr, mut tx_mbufs_dma) = ?;
-        // let (mut rx_mbufs_vaddr, mut rx_mbufs_dma) = ?;
-
-        
+        let (mut tx_mbufs_vaddr, mut tx_mbufs_dma) =
+            unsafe { kfn.dma_alloc_coherent(alloc_tx_buffer_pages) };
+        let (mut rx_mbufs_vaddr, mut rx_mbufs_dma) =
+            unsafe { kfn.dma_alloc_coherent(alloc_rx_buffer_pages) };
 
         if rx_mbufs_vaddr == 0 {
             panic!("e1000, alloc dma rx buffer failed");
         }
-
 
         for i in 0..TX_RING_SIZE {
             tx_ring[i].status = E1000_TXD_STAT_DD as u8;
@@ -132,7 +132,6 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
             tx_mbufs_dma += MBUF_SIZE;
             tx_mbufs_vaddr += MBUF_SIZE;
         }
-
 
         for i in 0..RX_RING_SIZE {
             rx_ring[i].addr = rx_mbufs_dma as u64;
@@ -207,11 +206,8 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
 
         // Exercise3 Checkpoint 3
         // set tx descriptor base address and tx ring length
-        // self.regs[??].write(??);
-        // self.regs[??].write(??);
-
-
-
+        self.regs[E1000_TDBAL].write(self.tx_ring_dma as u32);
+        self.regs[E1000_TDLEN].write((self.tx_ring.len() * size_of::<TxDesc>()) as u32);
 
         self.regs[E1000_TDT].write(0);
         self.regs[E1000_TDH].write(0);
@@ -223,13 +219,11 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
 
         // Exercise3 Checkpoint 4
         // set rx descriptor base address and rx ring length
-        // self.regs[??].write(??);
-        // self.regs[??].write(??);
+        self.regs[E1000_RDBAL].write(self.rx_ring_dma as u32);
+        self.regs[E1000_RDLEN].write((self.rx_ring.len() * size_of::<RxDesc>()) as u32);
 
         self.regs[E1000_RDH].write(0);
         self.regs[E1000_RDT].write((RX_RING_SIZE - 1) as u32);
-        
-
 
         // filter by qemu's MAC address, 52:54:00:12:34:56
         self.regs[E1000_RA].write(0x12005452);
@@ -238,7 +232,6 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
         for i in 0..(4096 / 32) {
             self.regs[E1000_MTA + i].write(0);
         }
-
 
         // transmitter control bits.
         self.regs[E1000_TCTL].write(
@@ -345,7 +338,7 @@ impl<'a, K: KernelFunc> E1000Device<'a, K> {
             None
         }
     }
-    
+
     // 参考
     // xv6_for_internet_os
     // https://xiayingp.gitbook.io/build_a_os/labs/lab-10-networking-part-1

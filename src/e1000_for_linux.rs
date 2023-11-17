@@ -76,8 +76,46 @@ module! {
 struct E1000Driver;
 
 impl E1000Driver {
-    fn handle_rx_irq(dev: &net::Device, napi: &Napi, data: &NetData) {  
+    fn handle_rx_irq(dev: &net::Device, napi: &Napi, data: &NetData) {
         // Exercise4 Checkpoint 1
+        let mut packets = 0;
+        let mut bytes = 0;
+
+        let recv_vec = {
+            let mut dev_e1k = data.dev_e1000.lock_irqdisable();
+            dev_e1k.as_mut().unwrap().e1000_recv()
+        };
+
+        if let Some(vec) = recv_vec {
+            packets = vec.len();
+            for (_i, packet) in vec.iter().enumerate() {
+                let mut len = packet.len();
+                let skb = dev.alloc_skb_ip_align(RXBUFFER).unwrap();
+                let skb_buf =
+                    unsafe { from_raw_parts_mut(skb.head_data().as_ptr() as *mut u8, len) };
+                skb_buf.copy_from_slice(&packet);
+                skb.put(len as u32);
+                let protocol = skb.eth_type_trans(dev);
+                skb.protocol_set(protocol);
+                napi.gro_receive(&skb);
+
+                bytes += len;
+            }
+            pr_info!(
+                "handle_rx_irq, received packets: {}, bytes: {}\n",
+                packets,
+                bytes
+            );
+        } else {
+            pr_warn!("None packets were received\n");
+        }
+
+        data.stats
+            .rx_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        data.stats
+            .rx_packets
+            .fetch_add(packets as u64, Ordering::Relaxed);
     }
 
     fn handle_tx_irq() {
@@ -231,13 +269,19 @@ impl net::DeviceOperations for E1000Driver {
             *dev_e1k = Some(e1000_device);
         }
 
-
         // Exercise3 Checkpoint 5
         // Enable interrupts
         // step1 set up irq_data
+        let irq_data = Box::try_new(IrqData {
+            dev_e1000: data.dev_e1000.clone(),
+            res: data.res.clone(),
+            napi: data.napi.clone(),
+        })?;
         // step2 request_irq
+        let irq_regist = request_irq(data.irq, irq_data)?;
         // step3 set up irq_handler
-
+        data.irq_handler
+            .store(Box::into_raw(Box::try_new(irq_regist)?), Ordering::Relaxed);
 
         // Enable NAPI scheduling
         data.napi.enable();
@@ -276,6 +320,43 @@ impl net::DeviceOperations for E1000Driver {
     ) -> NetdevTx {
         pr_info!("start xmit\n");
         // Exercise4 Checkpoint 2
+        skb.put_padto(bindings::ETH_ZLEN);
+        let _size = skb.len() - skb.data_len();
+        let skb_data = skb.head_data();
+
+        pr_info!(
+            "SkBuff length: {}, head data len: {}, get size: {}\n",
+            skb.len(),
+            skb_data.len(),
+            _size
+        );
+
+        dev.sent_queue(skb.len());
+
+        let len = {
+            let mut dev_e1k = data.dev_e1000.lock_irqdisable();
+            dev_e1k.as_mut().unwrap().e1000_transmit(skb_data)
+        };
+
+        if len < 0 {
+            pr_warn!("Failed to send transmit the skbuff packet: {}", len);
+            return net::NetdevTx::Busy;
+        }
+
+        // when clean_tx_irq
+        {
+            let bytes = skb.len() as u64;
+            let packets = 1;
+
+            skb.napi_consume(64);
+
+            data.stats.tx_bytes.fetch_add(bytes, Ordering::Relaxed);
+            data.stats.tx_packets.fetch_add(packets, Ordering::Relaxed);
+
+            dev.completed_queue(packets as u32, bytes as u32);
+        }
+
+        net::NetdevTx::Ok
     }
 
     /// Corresponds to `ndo_get_stats64` in `struct net_device_ops`.
