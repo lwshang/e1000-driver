@@ -469,6 +469,8 @@ impl kernel::Module for RustE1000dev {
     fn init(name: &'static CStr, module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rust e1000 device driver (init)\n");
 
+        unsafe { bindings::demo_print() };
+
         let dev = driver::Registration::<pci::Adapter<E1000Driver>>::new_pinned(name, module)?;
         Ok(RustE1000dev { dev })
     }
